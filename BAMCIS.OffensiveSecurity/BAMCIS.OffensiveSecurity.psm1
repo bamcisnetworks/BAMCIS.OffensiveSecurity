@@ -51,8 +51,15 @@ Function Start-PortScan {
         foreach ($Port in $Ports)
         {
             Write-Progress -Activity "Running Port Scan" -Status "Scanning Port $($Port.Port) $($Port.Service)" -PercentComplete (($i++ / $Ports.Count) * 100)
-            $Result = Test-Port -Port $Port.Port -ComputerName $ComputerName
-            $Results += ([PSCustomObject]@{"Service"="$($Port.Service)";"Port"=$($Port.Port);"Status"="$(if ($Result) {"Open"} else {"Closed"})"})
+            [System.Collections.Hashtable]$Splat = @{}
+
+			if ($Port.Transport -ieq "UDP")
+			{
+				$Splat.Add("Udp", $true)
+			}
+			
+			$Result = Test-Port -Port $Port.Port -ComputerName $ComputerName @Splat
+            $Results += ([PSCustomObject]@{"Service"="$($Port.Service)";"Port"=$($Port.Port);"Transport"="$($Port.Transport)";"Status"="$(if ($Result) {"Open"} else {"Closed"})"})
         }
 
         Write-Progress -Completed -Activity "Running Port Scan"
@@ -274,45 +281,196 @@ Function Get-WebHistory {
 	}
 }
 
+Function Get-WifiProfiles {
+	<#
+        .SYNOPSIS
+            Retrieves the stored Wi-Fi profiles and any associated passwords.
+
+        .DESCRIPTION
+            This cmdlet enumerates all of the stored wi-fi profiles and decrypts any stored
+            password for preshared key type access points.
+
+        .PARAMETER OnlyPasswordProfiles
+            This specifies that the results will contain only stored profiles that contain a password.
+
+        .EXAMPLE
+            $Profiles = Get-WifiProfiles
+
+            The $Profiles variable is a hash table that contains top level keys for each saved
+            profile and then has a hash table property that contains information about the Interface Id,
+            SSID name, and unencrypted password, if one exists.
+
+        .INPUTS
+            None
+
+        .OUTPUTS
+            System.Collections.Hashtable
+
+        .NOTES
+			AUTHOR: Michael Haken
+			LAST UPDATE: 1/25/2018
+    #>
+    [CmdletBinding()]
+	[OutputType([System.Collections.Hashtable])]
+	Param(
+        [Parameter()]
+        [Switch]$OnlyPasswordProfiles
+	)
+
+	Begin {
+		$Path = "$env:ProgramData\Microsoft\Wlansvc\Profiles\Interfaces"
+
+		if (-not (Test-IsLocalAdmin))
+		{
+			Write-Error -Exception (New-Object -TypeName System.Exception("This cmdlet requires local admin privileges.")) -ErrorAction Stop
+		}
+	}
+
+	Process {
+		$Profiles = @{}
+
+        try
+        {
+			# Run this as local system so the password decryption will work
+            $Token = Get-ProcessToken -ProcessName lsass
+            Set-ProcessToken -TokenHandle $Token -ElevatePrivileges
+
+			# Iterate each stored profile for each interface
+		    Get-ChildItem -Path $Path -Recurse | ForEach-Object {
+
+				# Only process actual xml files, not directories
+				if ([System.IO.File]::Exists($_.FullName))
+				{
+					Write-Verbose -Message "Processing $($_.FullName)."
+
+					try {
+
+						[Xml]$Xml = Get-Content -Path $_.FullName -Raw -ErrorAction SilentlyContinue
+                
+						if ($Xml -ne $null -and $Xml.HasChildNodes)
+						{
+							if (-not $OnlyPasswordProfiles -or ($OnlyPasswordProfiles -and ($Xml.WLANPRofile.MSM.security.sharedKey.keyMaterial -ne $null)))
+							{
+								$Name = $Xml.WLANPRofile.name
+								$SSID = $Xml.WLANProfile.SSIDConfig.name
+
+								# Make sure these both aren't null/empty
+								if (-not [System.String]::IsNullOrEmpty($Name) -or -not [System.String]::IsNullOrEmpty($SSID))
+								{
+									# If this is null/empty, then SSID wasn't
+									if ([System.String]::IsNullOrEmpty($Name))
+									{
+										$Name = $SSID
+									}
+									else
+									{
+										$SSID = $Name
+									}
+
+									$Profiles.Add($Name, @{})
+                            
+									$Profiles[$Name].Add("Interface", $($_.Directory.Name))
+
+									$Profiles[$Name].Add("SSID", $SSID)
+
+									if ($Xml.WLANProfile.MSM.security.sharedKey -ne $null)
+									{
+										$KeyType = $Xml.WLANProfile.MSM.security.sharedKey.keyType
+
+										if ($KeyType -eq "passPhrase" -and ($Xml.WLANProfile.MSM.security.sharedKey.keyMaterial -ne $null))
+										{
+											[System.String]$EncryptedPasswordHexString = $Xml.WLANProfile.MSM.security.sharedKey.keyMaterial
+
+											if ($EncryptedPasswordHexString.Length % 2 -eq 0)
+											{
+												[System.Byte[]]$Bytes = New-Object -TypeName System.Byte[] -ArgumentList ($EncryptedPasswordHexString.Length / 2)
+
+												for ($i = 0; $i -lt $Bytes.Length; $i++)
+												{
+													[System.String]$HexByteString = "$($EncryptedPasswordHexString[2 * $i])$($EncryptedPasswordHexString[(2 * $i) + 1])"
+													$Bytes[$i] = [System.Byte]::Parse($HexByteString, [System.Globalization.NumberStyles]::HexNumber)
+												}
+
+       
+												[System.Byte[]]$UnEncryptedData = [System.Security.Cryptography.ProtectedData]::Unprotect($Bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+
+												[System.String]$Password = [System.Text.Encoding]::UTF8.GetString($UnEncryptedData)
+                                        
+												# The passwords are stored as a null terminated string, so remove any leading
+												# or trailing null characters
+												$Password = $Password.Trim([System.Char]0x00)
+
+
+												$Profiles[$Name].Add("Password", $Password)
+											}
+											else
+											{
+												Write-Verbose -Message "The key material for $($_.FullName) did not have a correctly sized key."
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+					catch [Exception] {}
+				}
+		    }
+        }
+        finally 
+        {
+            Reset-ProcessToken -Verbose
+        }
+
+        Write-Output -InputObject $Profiles
+	}
+
+	End {
+	}
+}
 
 $script:Ports = @(
-	[PSCustomObject]@{"Service"="FTP Data";"Port"=20},
-	[PSCustomObject]@{"Service"="FTP Command";"Port"=21},
-	[PSCustomObject]@{"Service"="SSH";"Port"=22},
-	[PSCustomObject]@{"Service"="TelNet";"Port"=23},
-	[PSCustomObject]@{"Service"="SMTP";"Port"=25},
-	[PSCustomObject]@{"Service"="WINS";"Port"=42},
-	[PSCustomObject]@{"Service"="DNS";"Port"=53},
-	[PSCustomObject]@{"Service"="DHCP Server";"Port"=67},
-	[PSCustomObject]@{"Service"="DHCP Client";"Port"=68},
-	[PSCustomObject]@{"Service"="TFTP";"Port"=69},
-	[PSCustomObject]@{"Service"="HTTP";"Port"=80},
-	[PSCustomObject]@{"Service"="Kerberos";"Port"=88},
-	[PSCustomObject]@{"Service"="POP3";"Port"=110},
-	[PSCustomObject]@{"Service"="SFTP";"Port"=115},
-	[PSCustomObject]@{"Service"="NetBIOS Name Service";"Port"=137},
-	[PSCustomObject]@{"Service"="NetBIOS Datagram Service";"Port"=138},
-	[PSCustomObject]@{"Service"="NetBIOS Session Service";"Port"=139},
-	[PSCustomObject]@{"Service"="SNMP";"Port"=161},
-	[PSCustomObject]@{"Service"="LDAP";"Port"=389},
-	[PSCustomObject]@{"Service"="SSL";"Port"=443},
-	[PSCustomObject]@{"Service"="SMB";"Port"=445},
-	[PSCustomObject]@{"Service"="Syslog";"Port"=514},
-	[PSCustomObject]@{"Service"="RPC";"Port"=135},
-	[PSCustomObject]@{"Service"="LDAPS";"Port"=636},
-	[PSCustomObject]@{"Service"="SOCKS";"Port"=1080},
-	[PSCustomObject]@{"Service"="MSSQL";"Port"=1433},
-	[PSCustomObject]@{"Service"="SQL Browser";"Port"=1434},
-	[PSCustomObject]@{"Service"="Oracle DB";"Port"=1521},
-	[PSCustomObject]@{"Service"="NFS";"Port"=2049},
-	[PSCustomObject]@{"Service"="RDP";"Port"=3389},
-	[PSCustomObject]@{"Service"="XMPP";"Port"=5222},
-	[PSCustomObject]@{"Service"="HTTP Proxy";"Port"=8080},
-	[PSCustomObject]@{"Service"="Global Catalog";"Port"=3268},
-	[PSCustomObject]@{"Service"="Global Catalog/SSL";"Port"=3269},
-	[PSCustomObject]@{"Service"="POP3/SSL";"Port"=995},
-	[PSCustomObject]@{"Service"="IMAP/SSL";"Port"=993},
-	[PSCustomObject]@{"Service"="IMAP";"Port"=143}
+	[PSCustomObject]@{"Service"="FTP Data";"Port"=20;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="FTP Command";"Port"=21;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="SSH";"Port"=22;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="TelNet";"Port"=23;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="SMTP";"Port"=25;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="WINS";"Port"=42;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="DNS";"Port"=53;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="DNS";"Port"=53;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="DHCP Server";"Port"=67;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="DHCP Client";"Port"=68;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="TFTP";"Port"=69;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="HTTP";"Port"=80;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="Kerberos";"Port"=88;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="POP3";"Port"=110;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="SFTP";"Port"=115;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="NetBIOS Name Service";"Port"=137;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="NetBIOS Datagram Service";"Port"=138;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="NetBIOS Session Service";"Port"=139;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="SNMP";"Port"=161;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="LDAP";"Port"=389;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="LDAP";"Port"=389;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="SSL";"Port"=443;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="SMB";"Port"=445;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="Syslog";"Port"=514;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="RPC";"Port"=135;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="LDAPS";"Port"=636;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="SOCKS";"Port"=1080;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="MSSQL";"Port"=1433;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="SQL Browser";"Port"=1434;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="Oracle DB";"Port"=1521;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="NFS";"Port"=2049;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="RDP";"Port"=3389;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="XMPP";"Port"=5222;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="HTTP Proxy";"Port"=8080;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="Global Catalog";"Port"=3268;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="Global Catalog/SSL";"Port"=3269;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="POP3/SSL";"Port"=995;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="IMAP/SSL";"Port"=993;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="IMAP";"Port"=143;"Transport"="TCP"},
+	[PSCustomObject]@{"Service"="NTP";"Port"=123;"Transport"="UDP"},
+	[PSCustomObject]@{"Service"="BGP";"Port"=179;"Transport"="TCP"}
 )
 
 $script:LsaSignature = @"
