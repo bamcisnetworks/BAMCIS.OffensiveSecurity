@@ -399,15 +399,20 @@ Function Get-WifiProfiles {
 													$Bytes[$i] = [System.Byte]::Parse($HexByteString, [System.Globalization.NumberStyles]::HexNumber)
 												}
 
-       
+												Write-Verbose -Message "Preparing to decrypt $EncryptedPasswordHexString."
+
 												[System.Byte[]]$UnEncryptedData = [System.Security.Cryptography.ProtectedData]::Unprotect($Bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+
+												Write-Verbose -Message "Successfully unencrypted password."
 
 												[System.String]$Password = [System.Text.Encoding]::UTF8.GetString($UnEncryptedData)
                                         
+												Write-Verbose -Message "$Password"
+
 												# The passwords are stored as a null terminated string, so remove any leading
 												# or trailing null characters
 												$Password = $Password.Trim([System.Char]0x00)
-
+												Write-Verbose -Message "Password is $Password"
 
 												$Profiles[$Name].Add("Password", $Password)
 											}

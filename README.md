@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.1.2
+Fixed password decryption in Get-WifiProfiles cmdlet.
+
 ### 1.0.1.1
 Added additional output properties to Get-WifiProfiles cmdlet.
 
