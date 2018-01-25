@@ -373,6 +373,14 @@ Function Get-WifiProfiles {
 
 									$Profiles[$Name].Add("SSID", $SSID)
 
+									$Profiles[$Name].Add("Filename", $_.Name)
+
+									if ($Xml.WLANProfile.MSM.security.authEncryption -ne $null)
+									{
+										$Profiles[$Name].Add("Encryption", $Xml.WLANProfile.MSM.security.authEncryption.encryption)
+										$Profiles[$Name].Add("Authentication", $Xml.WLANProfile.MSM.security.authEncryption.authentication)
+									}
+
 									if ($Xml.WLANProfile.MSM.security.sharedKey -ne $null)
 									{
 										$KeyType = $Xml.WLANProfile.MSM.security.sharedKey.keyType
