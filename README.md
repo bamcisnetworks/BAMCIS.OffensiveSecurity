@@ -2,6 +2,9 @@
 
 ## Revision History
 
+### 1.0.1.3
+Removed excess verbose content.
+
 ### 1.0.1.2
 Fixed password decryption in Get-WifiProfiles cmdlet.
 
